@@ -26,7 +26,7 @@ async function operator(proxies = [], targetPlatform, context) {
   const cache = scriptResourceCache
   const method = $arguments.method || 'get'
   const gpt_url = $arguments.client === 'Android' ? `https://android.chat.openai.com` : `https://ios.chat.openai.com`
-    const aistudio_url = `https://aistudio.google.com`
+  const aistudio_url = `https://aistudio.google.com`
     const claude_url = `https://claude.ai`
   const target = isLoon ? 'Loon' : isSurge ? 'Surge' : undefined
   const concurrency = parseInt($arguments.concurrency || 10) // 一组并发数
@@ -35,19 +35,14 @@ async function operator(proxies = [], targetPlatform, context) {
     { concurrency }
   )
 
-  // const batches = []
-  // for (let i = 0; i < proxies.length; i += concurrency) {
-  //   const batch = proxies.slice(i, i + concurrency)
-  //   batches.push(batch)
-  // }
-
-  // for (const batch of batches) {
-  //   await Promise.all(batch.map(check))
-  // }
 
   return proxies
 
     async function check(proxy) {
+        const hkRegex = /🇭🇰|香港|Hong|HK/i
+        if (!hkRegex.test(proxy.name)) {
+            return
+          }
         // $.info(`[${proxy.name}] 检测`)
         // $.info(`检测 ${JSON.stringify(proxy, null, 2)}`)
         const id = cacheEnabled
