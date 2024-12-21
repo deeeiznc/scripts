@@ -32,8 +32,8 @@ async function operator(proxies = [], targetPlatform, context) {
   const target = isLoon ? 'Loon' : isSurge ? 'Surge' : undefined;
   const concurrency = parseInt($arguments.concurrency || 10);
 
-  const claude_url = 'https://claude.ai/new';
-  const google_ai_url = 'https://aistudio.google.com/prompts/new_chat';
+  const claude_url = 'https://claude.ai';
+  const google_ai_url = 'https://aistudio.google.com';
 
   const filteredProxies = proxies.filter(proxy =>
     ['🇭🇰', '香港', 'Hong', 'HK'].some(tag => proxy.name.includes(tag))
