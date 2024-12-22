@@ -3,8 +3,6 @@
  *
  * 适配 Sub-Store Node.js 版 请查看: https://t.me/zhetengsha/1209
  *
- * 欢迎加入 Telegram 群组 https://t.me/zhetengsha
- *
  * 参数
  * - [timeout] 请求超时(单位: 毫秒) 默认 5000
  * - [retries] 重试次数 默认 1
@@ -25,7 +23,7 @@ async function operator(proxies = [], targetPlatform, context) {
   const method = $arguments.method || 'get'
   const openai_url = $arguments.client === 'Android' ? `https://android.chat.openai.com` : `https://ios.chat.openai.com`
   const claude_url = `https://claude.ai`
-  const googleai_url = `https://aistudio.google.com`
+  const googleai_url = `https://gemini.google.com/`  // Changed to gemini.google.com for a more accurate check
   const target = isLoon ? 'Loon' : isSurge ? 'Surge' : undefined
   const concurrency = parseInt($arguments.concurrency || 10) // 一组并发数
 
@@ -42,12 +40,12 @@ async function operator(proxies = [], targetPlatform, context) {
 
   async function checkAI(proxy) {
     const id = cacheEnabled
-    ? `ai:${openai_url}:${JSON.stringify(
+      ? `ai:${openai_url}:${JSON.stringify(
         Object.fromEntries(
           Object.entries(proxy).filter(([key]) => !/^(name|collectionName|subName|id|_.*)$/i.test(key))
         )
       )}`
-    : undefined
+      : undefined
 
     try {
       const node = ProxyUtils.produce([proxy], target)
@@ -62,16 +60,16 @@ async function operator(proxies = [], targetPlatform, context) {
           return
         }
 
-        // Google AI Check
+        // Google AI Check - Prioritized for more accurate results
         $.info(`[${proxy.name}] Google AI 检测开始`)
         const googleAICheckResult = await checkGoogleAI(proxy, node);
         if (!googleAICheckResult) {
-            $.info(`[${proxy.name}] Google AI 检测失败`)
-            if (cacheEnabled) {
-                $.info(`[${proxy.name}] 设置失败缓存`)
-                cache.set(id, {})
-            }
-            return;
+          $.info(`[${proxy.name}] Google AI 检测失败`)
+          if (cacheEnabled) {
+            $.info(`[${proxy.name}] 设置失败缓存`)
+            cache.set(id, {})
+          }
+          return;
         }
         $.info(`[${proxy.name}] Google AI 检测成功`)
 
@@ -79,12 +77,12 @@ async function operator(proxies = [], targetPlatform, context) {
         $.info(`[${proxy.name}] Anthropic 检测开始`)
         const anthropicCheckResult = await checkClaude(proxy, node);
         if (!anthropicCheckResult) {
-            $.info(`[${proxy.name}] Anthropic 检测失败`)
-            if (cacheEnabled) {
-                $.info(`[${proxy.name}] 设置失败缓存`)
-                cache.set(id, {})
-            }
-            return;
+          $.info(`[${proxy.name}] Anthropic 检测失败`)
+          if (cacheEnabled) {
+            $.info(`[${proxy.name}] 设置失败缓存`)
+            cache.set(id, {})
+          }
+          return;
         }
         $.info(`[${proxy.name}] Anthropic 检测成功`)
 
@@ -92,12 +90,12 @@ async function operator(proxies = [], targetPlatform, context) {
         $.info(`[${proxy.name}] OpenAI 检测开始`)
         const openAICheckResult = await checkOpenAI(proxy, node);
         if (!openAICheckResult) {
-            $.info(`[${proxy.name}] OpenAI 检测失败`)
-            if (cacheEnabled) {
-                $.info(`[${proxy.name}] 设置失败缓存`)
-                cache.set(id, {})
-            }
-            return;
+          $.info(`[${proxy.name}] OpenAI 检测失败`)
+          if (cacheEnabled) {
+            $.info(`[${proxy.name}] 设置失败缓存`)
+            cache.set(id, {})
+          }
+          return;
         }
         $.info(`[${proxy.name}] OpenAI 检测成功`)
 
@@ -133,7 +131,7 @@ async function operator(proxies = [], targetPlatform, context) {
     let body = String(res.body ?? res.rawBody)
     try {
       body = JSON.parse(body)
-    } catch (e) {}
+    } catch (e) { }
     const msg = body?.error?.error_type || body?.cf_details
     let latency = `${Date.now() - startedAt}`
     $.info(`[${proxy.name}] OpenAI status: ${status}, msg: ${msg}, latency: ${latency}`)
@@ -170,32 +168,46 @@ async function operator(proxies = [], targetPlatform, context) {
       return false
     }
   }
-  
+
   async function checkGoogleAI(proxy, node) {
-    const startedAt = Date.now()
+    const startedAt = Date.now();
+    const url = googleai_url;
+    const method = 'GET'; // Use GET for a simple check
+
     const res = await http({
       method,
       headers: {
-        'User-Agent':
-          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
       },
-      url: googleai_url,
+      url,
       'policy-descriptor': node,
       node,
-    })
-    const status = parseInt(res.status ?? res.statusCode ?? 200)
+    });
 
-    let body = String(res.body ?? res.rawBody)
-    let latency = `${Date.now() - startedAt}`
-    $.info(`[${proxy.name}] Google AI status: ${status}, latency: ${latency}`)
+    const status = parseInt(res.status ?? res.statusCode ?? 0);
+    const latency = `${Date.now() - startedAt}`;
+    $.info(`[${proxy.name}] Google AI status: ${status}, latency: ${latency}`);
 
-    if (status >= 200 && status < 400) {
-      if (body.includes("/gemini-api/docs/available-regions")) {
-        return false
+    // Check for successful status codes and absence of specific error messages
+    if (status >= 200 && status < 300) {
+      // Check if the response body indicates an unavailable region (adjust the string as needed)
+      // More sophisticated check: Check if the response is HTML and look for specific elements.
+      if (res.headers['Content-Type'] && res.headers['Content-Type'].includes('text/html')) {
+        let body = String(res.body ?? res.rawBody);
+        if (body.includes('Your access to Gemini may be unavailable') || body.includes('not currently supported in your country')) {
+          return false; // Likely unavailable in the region
+        } else {
+          return true;    // Likely available
+        }
       }
       return true;
+    } else if (status === 403 || status === 429 || status === 503) {
+      // 403 Forbidden, 429 Too Many Requests, 503 Service Unavailable often indicate restrictions
+      return false;
     } else {
-      return false
+      // Other error codes or unexpected responses
+      $.info(`[${proxy.name}] Google AI check inconclusive. Status code: ${status}`);
+      return false; // Treat as unavailable to be safe
     }
   }
 
