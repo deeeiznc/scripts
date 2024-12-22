@@ -3,6 +3,8 @@
  *
  * 适配 Sub-Store Node.js 版 请查看: https://t.me/zhetengsha/1209
  *
+ * 欢迎加入 Telegram 群组 https://t.me/zhetengsha
+ *
  * 参数
  * - [timeout] 请求超时(单位: 毫秒) 默认 5000
  * - [retries] 重试次数 默认 1
@@ -23,7 +25,7 @@ async function operator(proxies = [], targetPlatform, context) {
   const method = $arguments.method || 'get'
   const openai_url = $arguments.client === 'Android' ? `https://android.chat.openai.com` : `https://ios.chat.openai.com`
   const claude_url = `https://claude.ai`
-  const googleai_url = `https://gemini.google.com/`  // Changed to gemini.google.com for a more accurate check
+  const googleai_url = `https://aistudio.google.com`
   const target = isLoon ? 'Loon' : isSurge ? 'Surge' : undefined
   const concurrency = parseInt($arguments.concurrency || 10) // 一组并发数
 
@@ -60,7 +62,7 @@ async function operator(proxies = [], targetPlatform, context) {
           return
         }
 
-        // Google AI Check - Prioritized for more accurate results
+        // Google AI Check
         $.info(`[${proxy.name}] Google AI 检测开始`)
         const googleAICheckResult = await checkGoogleAI(proxy, node);
         if (!googleAICheckResult) {
@@ -171,43 +173,74 @@ async function operator(proxies = [], targetPlatform, context) {
 
   async function checkGoogleAI(proxy, node) {
     const startedAt = Date.now();
-    const url = googleai_url;
-    const method = 'GET'; // Use GET for a simple check
 
-    const res = await http({
-      method,
+    // 1. Initial request to a known Google AI endpoint
+    const initialRes = await http({
+      method: 'get',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
+        'User-Agent':
+          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
       },
-      url,
+      url: 'https://gemini.google.com/_/BardChatUi/data/batchexecute',
       'policy-descriptor': node,
       node,
     });
 
-    const status = parseInt(res.status ?? res.statusCode ?? 0);
-    const latency = `${Date.now() - startedAt}`;
+    const initialStatus = parseInt(initialRes.status ?? initialRes.statusCode ?? 200);
+    let latency = `${Date.now() - startedAt}`;
+
+    $.info(`[${proxy.name}] Google AI initial status: ${initialStatus}, latency: ${latency}`);
+
+    // Check if the initial request fails (which likely means blocked)
+    if (initialStatus !== 200 && initialStatus !== 400) {
+      $.info(`[${proxy.name}] Google AI initial request failed with status: ${initialStatus}`);
+      return false;
+    }
+
+    // 2. Make a request to a specific endpoint that reveals region information
+    const res = await http({
+      method, // Using method from global options
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
+        'Referer': 'https://gemini.google.com/',
+      },
+      url: googleai_url,
+      'policy-descriptor': node,
+      node,
+    });
+
+    const status = parseInt(res.status ?? res.statusCode ?? 200);
+    const body = String(res.body ?? res.rawBody);
+    latency = `${Date.now() - startedAt}`;
+
     $.info(`[${proxy.name}] Google AI status: ${status}, latency: ${latency}`);
 
-    // Check for successful status codes and absence of specific error messages
-    if (status >= 200 && status < 300) {
-      // Check if the response body indicates an unavailable region (adjust the string as needed)
-      // More sophisticated check: Check if the response is HTML and look for specific elements.
-      if (res.headers['Content-Type'] && res.headers['Content-Type'].includes('text/html')) {
-        let body = String(res.body ?? res.rawBody);
-        if (body.includes('Your access to Gemini may be unavailable') || body.includes('not currently supported in your country')) {
-          return false; // Likely unavailable in the region
-        } else {
-          return true;    // Likely available
-        }
+    // 3. Analyze the response more effectively
+    if (status === 200) {
+      // a. Check for specific error messages indicating access from unsupported regions.
+      if (body.includes("google.com/tools/feedback/metric/report") || body.includes("Bard is not currently supported in your country")) {
+        $.info(`[${proxy.name}] Google AI detected as not available in the region (specific error message)`);
+        return false;
       }
-      return true;
-    } else if (status === 403 || status === 429 || status === 503) {
-      // 403 Forbidden, 429 Too Many Requests, 503 Service Unavailable often indicate restrictions
+
+      // b. Check for the presence of elements that should be present ONLY in responses from accessible regions.
+      if (body.includes(`data-is-retry-enabled="true"`) && body.includes(`data-initial-setup-complete="true"`)) {
+        $.info(`[${proxy.name}] Google AI passes check (positive indicators found)`);
+        return true;
+      } else {
+        $.info(`[${proxy.name}] Google AI potentially blocked (positive indicators not found). Check the body if it is changed.`);
+        return false;
+      }
+
+    } else if (status === 403 || status === 404) {
+      // c. A 403/404 often indicates that the service is not available in the region.
+      $.info(`[${proxy.name}] Google AI detected as not available in the region (403/404 status)`);
       return false;
     } else {
-      // Other error codes or unexpected responses
-      $.info(`[${proxy.name}] Google AI check inconclusive. Status code: ${status}`);
-      return false; // Treat as unavailable to be safe
+      // d. Other statuses may indicate other errors, making it difficult to determine availability.
+      $.info(`[${proxy.name}] Google AI check inconclusive (unexpected status: ${status})`);
+      return false; // Consider it a failure for safety
     }
   }
 
