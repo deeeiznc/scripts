@@ -11,13 +11,18 @@
  * - [retry_delay] 重试延时(单位: 毫秒) 默认 1000
  * - [concurrency] 并发数 默认 10
  * - [url] 检测的 URL. 需要 encodeURIComponent. 默认 http://www.apple.com/library/test/success.html
+ * - [ua] 请求头 User-Agent. 需要 encodeURIComponent. 默认 Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1
  * - [status] 合法的状态码. 默认 200
  * - [method] 请求方法. 默认 head, 如果测试 URL 不支持, 可设为 get
  * - [show_latency] 显示延迟. 默认不显示. 注: 即使不开启这个参数, 节点上也会添加一个 _latency 字段
  * - [keep_incompatible] 保留当前客户端不兼容的协议. 默认不保留.
- * - [cache] 使用缓存, 默认不使用缓存
  * - [telegram_bot_token] Telegram Bot Token
  * - [telegram_chat_id] Telegram Chat ID
+ * - [cache] 使用缓存, 默认不使用缓存
+ * 关于缓存时长
+ * 当使用相关脚本时, 若在对应的脚本中使用参数开启缓存, 可设置持久化缓存 sub-store-csr-expiration-time 的值来自定义默认缓存时长, 默认为 172800000 (48 * 3600 * 1000, 即 48 小时)
+ * 🎈Loon 可在插件中设置
+ * 其他平台同理, 持久化缓存数据在 JSON 里
  */
 
 async function operator(proxies = [], targetPlatform, env) {
@@ -32,12 +37,25 @@ async function operator(proxies = [], targetPlatform, env) {
   const keepIncompatible = $arguments.keep_incompatible
   const validStatus = parseInt($arguments.status || 200)
   const url = decodeURIComponent($arguments.url || 'http://www.apple.com/library/test/success.html')
+  const ua = decodeURIComponent(
+    $arguments.ua ||
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1'
+  )
   const target = isLoon ? 'Loon' : isSurge ? 'Surge' : undefined
   const validProxies = []
   const incompatibleProxies = []
   const failedProxies = []
-  const sub = env.source[proxies?.[0]?._subName || proxies?.[0]?.subName]
-  const subName = sub?.displayName || sub?.name
+  let name = ''
+  for (const [key, value] of Object.entries(env.source)) {
+    if (!key.startsWith('_')) {
+      name = value.displayName || value.name
+      break
+    }
+  }
+  if (!name) {
+    const collection = env.source._collection
+    name = collection.displayName || collection.name
+  }
 
   const concurrency = parseInt($arguments.concurrency || 10) // 一组并发数
   await executeAsyncTasks(
@@ -55,7 +73,7 @@ async function operator(proxies = [], targetPlatform, env) {
   // }
 
   if (telegram_chat_id && telegram_bot_token && failedProxies.length > 0) {
-    const text = `\`${subName}\` 节点测试:\n${failedProxies
+    const text = `\`${name}\` 节点测试:\n${failedProxies
       .map(proxy => `❌ [${proxy.type}] \`${proxy.name}\``)
       .join('\n')}`
     await http({
@@ -65,6 +83,8 @@ async function operator(proxies = [], targetPlatform, env) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ chat_id: telegram_chat_id, text, parse_mode: 'MarkdownV2' }),
+      retries: 0,
+      timeout: 5000,
     })
   }
 
@@ -101,8 +121,7 @@ async function operator(proxies = [], targetPlatform, env) {
         const res = await http({
           method,
           headers: {
-            'User-Agent':
-              'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
+            'User-Agent': ua,
           },
           url,
           'policy-descriptor': node,

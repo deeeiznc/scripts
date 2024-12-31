@@ -23,6 +23,10 @@
  * - [show_speed] 显示速度. 默认不显示. 注: 即使不开启这个参数, 节点上也会添加一个 _speed 字段
  * - [keep_incompatible] 保留当前客户端不兼容的协议. 默认不保留.
  * - [cache] 使用缓存, 默认不使用缓存
+ * 关于缓存时长
+ * 当使用相关脚本时, 若在对应的脚本中使用参数开启缓存, 可设置持久化缓存 sub-store-csr-expiration-time 的值来自定义默认缓存时长, 默认为 172800000 (48 * 3600 * 1000, 即 48 小时)
+ * 🎈Loon 可在插件中设置
+ * 其他平台同理, 持久化缓存数据在 JSON 里
  */
 
 async function operator(proxies = [], targetPlatform, context) {
@@ -105,7 +109,7 @@ async function operator(proxies = [], targetPlatform, context) {
   $.info(`等待 ${http_meta_start_delay / 1000} 秒后开始检测`)
   await $.wait(http_meta_start_delay)
 
-  const concurrency = parseInt($arguments.concurrency || 10) // 一组并发数
+  const concurrency = parseInt($arguments.concurrency || 1) // 一组并发数
   await executeAsyncTasks(
     internalProxies.map(proxy => () => check(proxy)),
     { concurrency }
