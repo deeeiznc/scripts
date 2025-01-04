@@ -79,7 +79,7 @@ async function operator(proxies = [], targetPlatform, context) {
         const cached = cache.get(id)
         if (cached) {
           if (cached.ai) {
-            proxies[proxy._proxies_index].name = `[AI] ${proxies[proxy._proxies_index].name}`
+            proxies[proxy._proxies_index].name = `${proxies[proxy._proxies_index].name} AI`
           }
         } else {
           allCached = false
@@ -179,7 +179,7 @@ ${JSON.stringify(res, null, 2)}`)
       if (cacheEnabled && cached) {
         $.info(`[${proxy.name}] 使用缓存`)
         if (cached.ai) {
-          proxies[proxy._proxies_index].name = `[AI] ${proxies[proxy._proxies_index].name}`
+          proxies[proxy._proxies_index].name = `${proxies[proxy._proxies_index].name} AI`
         }
         return
       }
@@ -205,7 +205,7 @@ ${JSON.stringify(res, null, 2)}`)
       const openaiStatus = await checkOpenAI(proxy, http_meta_host, http_meta_ports[index]);
 
       if (googleAiStatus && claudeStatus && openaiStatus) {
-        proxies[proxy._proxies_index].name = `[AI] ${proxies[proxy._proxies_index].name}`
+        proxies[proxy._proxies_index].name = `${proxies[proxy._proxies_index].name} AI`
         if (cacheEnabled) {
           $.info(`[${proxy.name}] 设置成功缓存`)
           cache.set(id, { ai: true })

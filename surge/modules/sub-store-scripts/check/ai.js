@@ -60,7 +60,7 @@ async function operator(proxies = [], targetPlatform, context) {
         if (cacheEnabled && cached) {
           $.info(`[${proxy.name}] 使用缓存`)
           if (cached.ai) {
-            proxy.name = `[AI] ${proxy.name}`
+            proxy.name = `${proxy.name} AI`
           }
           return
         }
@@ -105,7 +105,7 @@ async function operator(proxies = [], targetPlatform, context) {
         $.info(`[${proxy.name}] OpenAI 检测成功`)
 
         // All checks passed
-        proxy.name = `[AI] ${proxy.name}`
+        proxy.name = `${proxy.name} AI`
         if (cacheEnabled) {
           $.info(`[${proxy.name}] 设置成功缓存`)
           cache.set(id, { ai: true })
