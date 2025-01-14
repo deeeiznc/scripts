@@ -1,6 +1,9 @@
 /**
  *
  * AI 检测(适配 Sub-Store Node.js 版)
+ * 
+ * 在使用时可加参数，例如:
+ * https://raw.githubusercontent.com/deeeiznc/scripts/main/surge/modules/sub-store-scripts/check/AI.js#timeout=1000&retries=1&retry_delay=1000&concurrency=10&client=iOS
  *
  * Surge/Loon 版 请查看: https://t.me/zhetengsha/1207
  *
@@ -22,10 +25,19 @@
  * - [client] AI 检测的客户端类型. 默认 iOS
  * - [method] 请求方法. 默认 get
  * - [cache] 使用缓存, 默认不使用缓存
- * 关于缓存时长
- * 当使用相关脚本时, 若在对应的脚本中使用参数开启缓存, 可设置持久化缓存 sub-store-csr-expiration-time 的值来自定义默认缓存时长, 默认为 172800000 (48 * 3600 * 1000, 即 48 小时)
- * 🎈Loon 可在插件中设置
- * 其他平台同理, 持久化缓存数据在 JSON 里
+ *
+ * 
+ * [AI] 检测逻辑:
+ *  1) Google AI Check:  访问 https://aistudio.google.com 
+ *     - 如果跳转至 https://ai.google.dev/gemini-api/docs/available-regions 则判定无法访问
+ *  2) Claude Check:     访问 https://claude.ai
+ *     - 如果跳转至 https://www.anthropic.com/app-unavailable-in-region?utm_source=country 则判定无法访问
+ *  3) OpenAI Check:     访问 https://ios.chat.openai.com (或 https://android.chat.openai.com)
+ *     - 原脚本逻辑: status=403 且返回体中不含 'unsupported_country' 时判定成功
+ *
+ * 如果全部成功, 则给节点名添加 `[AI] ` 前缀.
+ * 仅对节点名包含 "🇭🇰", "香港", "Hong", "HK" 的节点执行检测.
+ *
  */
 
 async function operator(proxies = [], targetPlatform, context) {
@@ -40,20 +52,26 @@ async function operator(proxies = [], targetPlatform, context) {
   const http_meta_proxy_timeout = parseFloat($arguments.http_meta_proxy_timeout ?? 10000)
   const method = $arguments.method || 'get'
 
-  // OpenAI default URL (last check)
-  const openaiUrl = $arguments.client === 'Android'
-    ? `https://android.chat.openai.com`
-    : `https://ios.chat.openai.com`
-
-  const googleAiUrl = `https://aistudio.google.com`
-  const anthropicUrl = `https://claude.ai`
+  // 访问的三个目标
+  const googleAIURL = 'https://aistudio.google.com'
+  const anthroURL = 'https://claude.ai'
+  const openAIURL =
+    $arguments.client === 'Android'
+      ? `https://android.chat.openai.com`
+      : `https://ios.chat.openai.com`
 
   const $ = $substore
   const internalProxies = []
+  // 只对名字包含 🇭🇰 / 香港 / Hong / HK 的节点执行检测
+  const targetKeywords = ['🇭🇰', '香港', 'Hong', 'HK']
 
-  // Filter and convert proxies
   proxies.map((proxy, index) => {
     try {
+      // 判断节点名是否符合关键词匹配
+      if (!targetKeywords.some(k => proxy.name.includes(k))) {
+        // 跳过不符合条件的节点
+        return
+      }
       const node = ProxyUtils.produce([{ ...proxy }], 'ClashMeta', 'internal')?.[0]
       if (node) {
         for (const key in proxy) {
@@ -71,36 +89,34 @@ async function operator(proxies = [], targetPlatform, context) {
   $.info(`核心支持节点数: ${internalProxies.length}/${proxies.length}`)
   if (!internalProxies.length) return proxies
 
-  // If using cache, check first
   if (cacheEnabled) {
     try {
       let allCached = true
-      for (let i = 0; i < internalProxies.length; i++) {
+      for (var i = 0; i < internalProxies.length; i++) {
         const proxy = internalProxies[i]
         const id = getCacheId({ proxy })
         const cached = cache.get(id)
         if (cached && cached.ai) {
-          // Already identified as AI
           proxies[proxy._proxies_index].name = `[AI] ${proxies[proxy._proxies_index].name}`
-        } else if (cached) {
-          // Cached, but no AI
-        } else {
+        } else if (!cached) {
           allCached = false
           break
         }
       }
       if (allCached) {
-        $.info('所有节点都有有效缓存 完成')
+        $.info('所有可检测节点都有有效缓存, 完成')
         return proxies
       }
-    } catch (e) {}
+    } catch (e) {
+      $.error(e)
+    }
   }
 
-  // Start HTTP META
   const http_meta_timeout = http_meta_start_delay + internalProxies.length * http_meta_proxy_timeout
   let http_meta_pid
   let http_meta_ports = []
 
+  // 启动 HTTP META
   const startRes = await http({
     retries: 0,
     method: 'post',
@@ -114,12 +130,10 @@ async function operator(proxies = [], targetPlatform, context) {
       timeout: http_meta_timeout,
     }),
   })
-
   let startBody = startRes.body
   try {
     startBody = JSON.parse(startBody)
   } catch (e) {}
-
   const { ports, pid } = startBody
   if (!pid || !ports) {
     throw new Error(`======== HTTP META 启动失败 ====\n${startBody}`)
@@ -132,17 +146,16 @@ async function operator(proxies = [], targetPlatform, context) {
       Math.round(http_meta_timeout / 60 / 10) / 100
     } 分钟后自动关闭\n`
   )
-  $.info(`等待 ${http_meta_start_delay / 1000} 秒后开始检测`)
+  $.info(`等待 ${http_meta_start_delay / 1000} 秒后开始检测...`)
   await $.wait(http_meta_start_delay)
 
-  // Perform checks concurrently
-  const concurrency = parseInt($arguments.concurrency || 10)
+  const concurrency = parseInt($arguments.concurrency || 10) // 一组并发数
   await executeAsyncTasks(
-    internalProxies.map(proxy => () => check(proxy)),
+    internalProxies.map(proxy => () => doAllChecks(proxy)),
     { concurrency }
   )
 
-  // Stop HTTP META
+  // stop http meta
   try {
     const stopRes = await http({
       method: 'post',
@@ -151,7 +164,9 @@ async function operator(proxies = [], targetPlatform, context) {
         'Content-type': 'application/json',
         Authorization: http_meta_authorization,
       },
-      body: JSON.stringify({ pid: [http_meta_pid] }),
+      body: JSON.stringify({
+        pid: [http_meta_pid],
+      }),
     })
     $.info(`\n======== HTTP META 关闭 ====\n${JSON.stringify(stopRes, null, 2)}`)
   } catch (e) {
@@ -161,193 +176,163 @@ async function operator(proxies = [], targetPlatform, context) {
   return proxies
 
   /**
-   * Checks if the proxy can pass Google AI -> Anthropic -> OpenAI
-   * If all pass, rename node to [AI].
+   * 先后顺序:
+   * 1) Google AI  => 若失败则不检测后续
+   * 2) Claude(AI) => 若失败则不检测后续
+   * 3) OpenAI     => 若失败则不加 [AI]
    */
-  async function check(proxy) {
-    // Only detect if name contains 🇭🇰, 香港, Hong, HK
-    const doDetection = /🇭🇰|香港|Hong|HK/i.test(proxy.name)
-    if (!doDetection) {
-      return
-    }
-
+  async function doAllChecks(proxy) {
     const id = cacheEnabled ? getCacheId({ proxy }) : null
     try {
-      // If cached
-      const cached = cacheEnabled ? cache.get(id) : null
-      if (cached) {
-        // Use cache
-        $.info(`[${proxy.name}] 使用缓存`)
+      const cached = cache.get(id)
+      if (cacheEnabled && cached) {
+        // 缓存存在
+        $.info(`[${proxy.name}] 使用缓存结果: ${JSON.stringify(cached)}`)
         if (cached.ai) {
           proxies[proxy._proxies_index].name = `[AI] ${proxies[proxy._proxies_index].name}`
         }
         return
       }
 
+      // 如果没有缓存或缓存不完整, 重新检测
       const index = internalProxies.indexOf(proxy)
-      const finalProxy = `http://${http_meta_host}:${http_meta_ports[index]}`
+      const proxyURL = `http://${http_meta_host}:${http_meta_ports[index]}`
 
-      // 1. Google AI check
-      const googlePassed = await checkGoogleAI(finalProxy)
-      if (!googlePassed) {
-        $.info(`[${proxy.name}] Google AI 检测失败`)
-        if (cacheEnabled) cache.set(id, {})
+      const googleAI = await checkGoogleAI(proxyURL)
+      if (!googleAI) {
+        // 若失败
+        updateCache(false)
+        return
+      }
+      const anthro = await checkAnthro(proxyURL)
+      if (!anthro) {
+        updateCache(false)
+        return
+      }
+      const openai = await checkOpenAI(proxyURL)
+      if (!openai) {
+        updateCache(false)
         return
       }
 
-      // 2. Anthropic (Claude) check
-      const anthropicPassed = await checkAnthropic(finalProxy)
-      if (!anthropicPassed) {
-        $.info(`[${proxy.name}] Anthropic 检测失败`)
-        if (cacheEnabled) cache.set(id, {})
-        return
-      }
-
-      // 3. OpenAI check (existing logic)
-      const openaiPassed = await checkOpenAI(finalProxy)
-      if (!openaiPassed) {
-        $.info(`[${proxy.name}] OpenAI 检测失败`)
-        if (cacheEnabled) cache.set(id, {})
-        return
-      }
-
-      // If all checks pass, rename to [AI]
+      // 全部成功 => 标记 [AI]
       proxies[proxy._proxies_index].name = `[AI] ${proxies[proxy._proxies_index].name}`
-      if (cacheEnabled) {
-        $.info(`[${proxy.name}] 设置成功缓存 (AI)`)
-        cache.set(id, { ai: true })
+      updateCache(true)
+
+      function updateCache(ok) {
+        if (cacheEnabled) {
+          $.info(`[${proxy.name}] 设置${ok ? '成功' : '失败'}缓存`)
+          cache.set(id, { ai: ok })
+        }
       }
     } catch (e) {
-      $.error(`[${proxy.name}] ${e.message ?? e}`)
-      if (cacheEnabled) cache.set(id, {})
+      $.error(`[${proxy.name}] 检测出现错误: ${e.message ?? e}`)
+      if (cacheEnabled && id) {
+        cache.set(id, { ai: false })
+      }
     }
   }
 
-  /**
-   * Google AI Check:
-   * - Request https://aistudio.google.com
-   * - Failure if it redirects to https://ai.google.dev/gemini-api/docs/available-regions
-   */
-  async function checkGoogleAI(proxyUrl) {
+  async function checkGoogleAI(proxyURL) {
     try {
       const res = await http({
-        proxy: proxyUrl,
+        proxy: proxyURL,
         method,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko)',
-        },
-        url: googleAiUrl,
-        // We might rely on the "Location" header if there's a redirect
-        // or if status is 30x with location
-        allowRedirects: false,
+        url: googleAIURL,
       })
-
-      // If we see a 30x with "location" we check if it is the blocked URL
       const status = parseInt(res.status || res.statusCode || 200)
-      const location = res.headers?.location || ''
-      if ((status >= 300 && status < 400) && location.includes('ai.google.dev/gemini-api/docs/available-regions')) {
+      const finalLocation = res.headers?.location || ''
+      $.info(`[Google AI] ${googleAIURL} => status: ${status}, location: ${finalLocation}`)
+      // 如果重定向到不可用地区说明失败
+      if (finalLocation.startsWith('https://ai.google.dev/gemini-api/docs/available-regions')) {
         return false
       }
-      // If it tries to do an immediate redirect and the final location is that region block
-      // some platforms might auto-follow
-      const finalUrl = res.responseUrl || ''
-      if (finalUrl.includes('ai.google.dev/gemini-api/docs/available-regions')) {
-        return false
-      }
+      // 只要没跳到限制页面，就视为成功
       return true
     } catch (e) {
+      $.error(`[Google AI] 检测异常: ${e.message ?? e}`)
       return false
     }
   }
 
-  /**
-   * Anthropic (Claude) Check:
-   * - Request https://claude.ai
-   * - Failure if it redirects to https://www.anthropic.com/app-unavailable-in-region?utm_source=country
-   */
-  async function checkAnthropic(proxyUrl) {
+  async function checkAnthro(proxyURL) {
     try {
       const res = await http({
-        proxy: proxyUrl,
+        proxy: proxyURL,
         method,
+        url: anthroURL,
+        // Claude 有时需要 UA，否则可能 403
         headers: {
-          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko)',
+          'User-Agent':
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
         },
-        url: anthropicUrl,
-        allowRedirects: false,
       })
-
       const status = parseInt(res.status || res.statusCode || 200)
-      const location = res.headers?.location || ''
-      if (
-        (status >= 300 && status < 400) &&
-        location.includes('www.anthropic.com/app-unavailable-in-region?utm_source=country')
-      ) {
+      const finalLocation = res.headers?.location || ''
+      $.info(`[Claude AI] ${anthroURL} => status: ${status}, location: ${finalLocation}`)
+      // 如果重定向到 app-unavailable 则失败
+      if (finalLocation.startsWith('https://www.anthropic.com/app-unavailable-in-region?utm_source=country')) {
         return false
       }
-      const finalUrl = res.responseUrl || ''
-      if (finalUrl.includes('www.anthropic.com/app-unavailable-in-region?utm_source=country')) {
-        return false
-      }
+      // 同理，只要没跳到限制页面，就视为成功
       return true
     } catch (e) {
+      $.error(`[Claude AI] 检测异常: ${e.message ?? e}`)
       return false
     }
   }
 
-  /**
-   * OpenAI Check (existing logic):
-   * - If status == 403 and msg != 'unsupported_country' => pass
-   * - Otherwise fail
-   */
-  async function checkOpenAI(proxyUrl) {
-    let pass = false
+  async function checkOpenAI(proxyURL) {
     try {
       const startedAt = Date.now()
       const res = await http({
-        proxy: proxyUrl,
+        proxy: proxyURL,
         method,
+        url: openAIURL,
         headers: {
           'User-Agent':
-            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko)',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
         },
-        url: openaiUrl,
       })
-
       const status = parseInt(res.status || res.statusCode || 200)
       let body = String(res.body ?? res.rawBody)
       try {
         body = JSON.parse(body)
       } catch (e) {}
       const msg = body?.error?.error_type || body?.cf_details
-      const latency = `${Date.now() - startedAt}`
-      // Cloudflare intercept 400, or 403 => region check
-      // if 403 and msg != 'unsupported_country', then pass
+      const latency = Date.now() - startedAt
+      $.info(`[OpenAI] => status: ${status}, msg: ${msg || ''}, latency: ${latency}ms`)
+
+      // 原有逻辑: cf拦截时返回 status=400, 403说明不在支持地区或没鉴权？
+      // 最终判断: status == 403 && msg != 'unsupported_country' => 视为成功
       if (status === 403 && !['unsupported_country'].includes(msg)) {
-        pass = true
+        return true
       }
-      $.info(`OpenAI -> status: ${status}, msg: ${msg}, latency: ${latency}, pass: ${pass}`)
+      // 其他情况视为失败
+      return false
     } catch (e) {
-      $.error(`OpenAI 检测错误: ${e.message ?? e}`)
+      $.error(`[OpenAI] 检测异常: ${e.message ?? e}`)
+      return false
     }
-    return pass
   }
 
-  // Universal HTTP request with retries
+  // =========== 基础函数 =============
+
   async function http(opt = {}) {
     const METHOD = opt.method || $arguments.method || 'get'
     const TIMEOUT = parseFloat(opt.timeout || $arguments.timeout || 5000)
     const RETRIES = parseFloat(opt.retries ?? $arguments.retries ?? 1)
     const RETRY_DELAY = parseFloat(opt.retry_delay ?? $arguments.retry_delay ?? 1000)
-    let count = 0
 
-    const fn = async () => {
+    let count = 0
+    async function fn() {
       try {
         return await $.http[METHOD]({ ...opt, timeout: TIMEOUT })
       } catch (e) {
         if (count < RETRIES) {
           count++
           const delay = RETRY_DELAY * count
+          $.info(`第 ${count} 次请求失败: ${e.message || e}, 等待 ${delay / 1000}s 后重试`)
           await $.wait(delay)
           return await fn()
         } else {
@@ -355,17 +340,19 @@ async function operator(proxies = [], targetPlatform, context) {
         }
       }
     }
-    return await fn()
+    return fn()
   }
 
-  // For caching
   function getCacheId({ proxy = {} }) {
-    return `http-meta:ai:${JSON.stringify(
-      Object.fromEntries(Object.entries(proxy).filter(([key]) => !/^(name|collectionName|subName|id|_.*)$/i.test(key)))
+    // 注意: 去掉了对 url 的区分, 因为我们要对同一个节点做三次检测.
+    // 这里可仅以节点信息作为 CacheKey, 或者进一步分开.
+    return `http-meta:ai-check:${JSON.stringify(
+      Object.fromEntries(
+        Object.entries(proxy).filter(([key]) => !/^(name|collectionName|subName|id|_.*)$/i.test(key))
+      )
     )}`
   }
 
-  // Async concurrency
   function executeAsyncTasks(tasks, { wrap, result, concurrency = 1 } = {}) {
     return new Promise(async (resolve, reject) => {
       try {
@@ -373,7 +360,7 @@ async function operator(proxies = [], targetPlatform, context) {
         const results = []
         let index = 0
 
-        function executeNextTask() {
+        async function executeNextTask() {
           while (index < tasks.length && running < concurrency) {
             const taskIndex = index++
             const currentTask = tasks[taskIndex]
