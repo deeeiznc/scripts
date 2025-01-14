@@ -2,6 +2,13 @@
  *
  * AI 检测(适配 Sub-Store Node.js 版)
  *
+ * 注意:
+ * 1) 仅在节点名称包含以下字符串时检测: 🇭🇰, 香港, Hong, HK
+ * 2) 完整通过 Google AI、Anthropic、OpenAI 检测后, 才会在节点名前添加 [AI]
+ *
+ * 使用参数示例:
+ * https://raw.githubusercontent.com/deeeiznc/scripts/main/surge/modules/sub-store-scripts/check/AI.js#timeout=1000&retries=1&retry_delay=1000&concurrency=10&client=iOS
+ *
  * Surge/Loon 版 请查看: https://t.me/zhetengsha/1207
  *
  * 欢迎加入 Telegram 群组 https://t.me/zhetengsha
@@ -12,46 +19,54 @@
  * - [http_meta_port] 端口号 默认: 9876
  * - [http_meta_authorization] Authorization 默认无
  * - [http_meta_start_delay] 初始启动延时(单位: 毫秒) 默认: 3000
- * - [http_meta_proxy_timeout] 每个节点耗时(单位: 毫秒). 此参数是为了防止脚本异常退出未关闭核心. 设置过小将导致核心过早退出. 目前逻辑: 启动初始的延时 + 每个节点耗时. 默认: 10000
+ * - [http_meta_proxy_timeout] 每个节点耗时(单位: 毫秒). 此参数是为了防止脚本异常退出未关闭核心.
+ *   设置过小将导致核心过早退出. 目前逻辑: 启动初始的延时 + 每个节点耗时. 默认: 10000
  *
  * 其它参数
  * - [timeout] 请求超时(单位: 毫秒) 默认 5000
  * - [retries] 重试次数 默认 1
  * - [retry_delay] 重试延时(单位: 毫秒) 默认 1000
  * - [concurrency] 并发数 默认 10
- * - [client] GPT 检测的客户端类型. 默认 iOS
+ * - [client] OpenAI 检测的客户端类型. 默认 iOS
  * - [method] 请求方法. 默认 get
- * - [cache] 使用缓存, 默认不使用缓存
- * 关于缓存时长
- * 当使用相关脚本时, 若在对应的脚本中使用参数开启缓存, 可设置持久化缓存 sub-store-csr-expiration-time 的值来自定义默认缓存时长, 默认为 172800000 (48 * 3600 * 1000, 即 48 小时)
- * 🎈Loon 可在插件中设置
- * 其他平台同理, 持久化缓存数据在 JSON 里
+ * - [cache] 是否使用缓存, 默认不使用
  */
 
 async function operator(proxies = [], targetPlatform, context) {
   const cacheEnabled = $arguments.cache
   const cache = scriptResourceCache
+
   const http_meta_host = $arguments.http_meta_host ?? '127.0.0.1'
   const http_meta_port = $arguments.http_meta_port ?? 9876
   const http_meta_protocol = $arguments.http_meta_protocol ?? 'http'
   const http_meta_authorization = $arguments.http_meta_authorization ?? ''
   const http_meta_api = `${http_meta_protocol}://${http_meta_host}:${http_meta_port}`
+
   const http_meta_start_delay = parseFloat($arguments.http_meta_start_delay ?? 3000)
   const http_meta_proxy_timeout = parseFloat($arguments.http_meta_proxy_timeout ?? 10000)
   const method = $arguments.method || 'get'
-  const openai_url = $arguments.client === 'Android' ? `https://android.chat.openai.com` : `https://ios.chat.openai.com`
-  const claude_url = `https://claude.ai`
-  const googleai_url = `https://aistudio.google.com`
+  // 原脚本中: client===Android => https://android.chat.openai.com, 否则 => https://ios.chat.openai.com
+  // 这里作为 OpenAI 检测地址
+  const openai_url =
+    $arguments.client === 'Android'
+      ? 'https://android.chat.openai.com'
+      : 'https://ios.chat.openai.com'
+
+  // Google AI 检测地址
+  const google_url = 'https://aistudio.google.com'
+  // Anthropic (Claude) 检测地址
+  const anthropic_url = 'https://claude.ai'
 
   const $ = $substore
   const internalProxies = []
+
+  // 仅保留可用的 ClashMeta 方式节点
   proxies.map((proxy, index) => {
     try {
-      
-      if (!(proxy.name.includes("🇭🇰") || proxy.name.includes("香港") || proxy.name.includes("Hong") || proxy.name.includes("HK"))) {
-        return;
+      // 只检测名字中包含 🇭🇰、香港、Hong、HK 的节点
+      if (!isHKNode(proxy.name)) {
+        return
       }
-
       const node = ProxyUtils.produce([{ ...proxy }], 'ClashMeta', 'internal')?.[0]
       if (node) {
         for (const key in proxy) {
@@ -59,46 +74,47 @@ async function operator(proxies = [], targetPlatform, context) {
             node[key] = proxy[key]
           }
         }
-        // $.info(JSON.stringify(node, null, 2))
         internalProxies.push({ ...node, _proxies_index: index })
       }
     } catch (e) {
       $.error(e)
     }
   })
-  // $.info(JSON.stringify(internalProxies, null, 2))
-  $.info(`核心支持节点数: ${internalProxies.length}/${proxies.length}`)
+
+  $.info(`核心支持节点数(匹配 🇭🇰/香港/Hong/HK): ${internalProxies.length}/${proxies.length}`)
   if (!internalProxies.length) return proxies
 
+  // 若启用缓存, 检查是否全部都有缓存
   if (cacheEnabled) {
     try {
       let allCached = true
-      for (var i = 0; i < internalProxies.length; i++) {
+      for (let i = 0; i < internalProxies.length; i++) {
         const proxy = internalProxies[i]
-        const id = getCacheId({ proxy, openai_url, claude_url, googleai_url })
+        const id = getCacheId(proxy)
         const cached = cache.get(id)
-        if (cached) {
-          if (cached.ai) {
-            proxies[proxy._proxies_index].name = `${proxies[proxy._proxies_index].name} AI`
-          }
-        } else {
+        if (cached && cached.ai) {
+          // 通过 AI 检测
+          proxies[proxy._proxies_index].name = `[AI] ${proxies[proxy._proxies_index].name}`
+        } else if (!cached) {
+          // 缓存中无记录
           allCached = false
           break
         }
       }
       if (allCached) {
-        $.info('所有节点都有有效缓存 完成')
+        $.info('所有匹配节点都有有效缓存，检测完成')
         return proxies
       }
-    } catch (e) {}
+    } catch (e) {
+      $.info(`cache check error: ${e}`)
+    }
   }
 
+  // 启动 HTTP META
   const http_meta_timeout = http_meta_start_delay + internalProxies.length * http_meta_proxy_timeout
-
   let http_meta_pid
   let http_meta_ports = []
-  // 启动 HTTP META
-  const res = await http({
+  const resStart = await http({
     retries: 0,
     method: 'post',
     url: `${http_meta_api}/start`,
@@ -111,48 +127,36 @@ async function operator(proxies = [], targetPlatform, context) {
       timeout: http_meta_timeout,
     }),
   })
-  let body = res.body
+
+  let body = resStart.body
   try {
     body = JSON.parse(body)
   } catch (e) {}
   const { ports, pid } = body
   if (!pid || !ports) {
-    throw new Error(`======== HTTP META 启动失败 ====
-${body}`)
+    throw new Error(`======== HTTP META 启动失败 ====\n${body}`)
   }
   http_meta_pid = pid
   http_meta_ports = ports
+
   $.info(
-    `
-======== HTTP META 启动 ====
-[端口] ${ports}
-[PID] ${pid}
-[超时] 若未手动关闭 ${
-      Math.round(http_meta_timeout / 60 / 10) / 100
-    } 分钟后自动关闭
-`
+    `\n======== HTTP META 启动 ====\n[端口] ${ports}\n[PID] ${pid}\n[超时] ${
+      Math.round(http_meta_timeout / 6000) / 10
+    } 分钟后自动关闭\n`
   )
   $.info(`等待 ${http_meta_start_delay / 1000} 秒后开始检测`)
   await $.wait(http_meta_start_delay)
 
-  const concurrency = parseInt($arguments.concurrency || 10) // 一组并发数
+  // 并发检测
+  const concurrency = parseInt($arguments.concurrency || 10)
   await executeAsyncTasks(
-    internalProxies.map(proxy => () => check(proxy)),
+    internalProxies.map(proxy => () => checkAllAI(proxy)),
     { concurrency }
   )
 
-  // const batches = []
-  // for (let i = 0; i < internalProxies.length; i += concurrency) {
-  //   const batch = internalProxies.slice(i, i + concurrency)
-  //   batches.push(batch)
-  // }
-  // for (const batch of batches) {
-  //   await Promise.all(batch.map(check))
-  // }
-
-  // stop http meta
+  // 关闭 HTTP META
   try {
-    const res = await http({
+    const resStop = await http({
       method: 'post',
       url: `${http_meta_api}/stop`,
       headers: {
@@ -163,148 +167,204 @@ ${body}`)
         pid: [http_meta_pid],
       }),
     })
-    $.info(`
-======== HTTP META 关闭 ====
-${JSON.stringify(res, null, 2)}`)
+    $.info(`\n======== HTTP META 关闭 ====\n${JSON.stringify(resStop, null, 2)}`)
   } catch (e) {
     $.error(e)
   }
 
   return proxies
 
-  async function check(proxy) {
-    const id = cacheEnabled ? getCacheId({ proxy, openai_url, claude_url, googleai_url }) : undefined
+  /**
+   * 顺序检测：Google AI -> Anthropic -> OpenAI
+   * 全部通过后 => [AI]
+   */
+  async function checkAllAI(proxy) {
+    const id = cacheEnabled ? getCacheId(proxy) : null
     try {
-      const cached = cache.get(id)
-      if (cacheEnabled && cached) {
-        $.info(`[${proxy.name}] 使用缓存`)
-        if (cached.ai) {
-          proxies[proxy._proxies_index].name = `${proxies[proxy._proxies_index].name} AI`
+      if (cacheEnabled) {
+        const cached = cache.get(id)
+        if (cached && cached.ai) {
+          // 缓存已有, 无需重新检测
+          $.info(`[${proxy.name}] 使用缓存通过: AI`)
+          proxies[proxy._proxies_index].name = `[AI] ${proxies[proxy._proxies_index].name}`
+          return
         }
+      }
+
+      // 顺序检测
+      const googlePass = await checkGoogleAI(proxy)
+      if (!googlePass) {
+        setFailCache(id)
         return
       }
-      const index = internalProxies.indexOf(proxy)
-      
-      const googleAiStatus = await checkGoogleAI(proxy, http_meta_host, http_meta_ports[index]);
-      if (!googleAiStatus) {
-        if (cacheEnabled) {
-          $.info(`[${proxy.name}] 设置失败缓存`)
-          cache.set(id, {})
-        }
-        return;
+      const anthropicPass = await checkAnthropic(proxy)
+      if (!anthropicPass) {
+        setFailCache(id)
+        return
       }
-      const claudeStatus = await checkClaude(proxy, http_meta_host, http_meta_ports[index]);
-      if (!claudeStatus) {
-        if (cacheEnabled) {
-          $.info(`[${proxy.name}] 设置失败缓存`)
-          cache.set(id, {})
-        }
-        return;
+      const openAIPass = await checkOpenAI(proxy)
+      if (!openAIPass) {
+        setFailCache(id)
+        return
       }
-      
-      const openaiStatus = await checkOpenAI(proxy, http_meta_host, http_meta_ports[index]);
 
-      if (googleAiStatus && claudeStatus && openaiStatus) {
-        proxies[proxy._proxies_index].name = `${proxies[proxy._proxies_index].name} AI`
-        if (cacheEnabled) {
-          $.info(`[${proxy.name}] 设置成功缓存`)
-          cache.set(id, { ai: true })
-        }
-      } else {
-        if (cacheEnabled) {
-          $.info(`[${proxy.name}] 设置失败缓存`)
-          cache.set(id, {})
-        }
-      }
-    } catch (e) {
-      $.error(`[${proxy.name}] ${e.message ?? e}`)
+      // 全部通过 => [AI] 标记
+      proxies[proxy._proxies_index].name = `[AI] ${proxies[proxy._proxies_index].name}`
       if (cacheEnabled) {
-        $.info(`[${proxy.name}] 设置失败缓存`)
-        cache.set(id, {})
+        $.info(`[${proxy.name}] 设置成功缓存 (AI)`)
+        cache.set(id, { ai: true })
+      }
+    } catch (err) {
+      $.error(`[${proxy.name}] ${err.message ?? err}`)
+      setFailCache(id)
+    }
+
+    function setFailCache(cacheId) {
+      if (cacheEnabled && cacheId) {
+        cache.set(cacheId, {})
       }
     }
   }
 
-  async function checkOpenAI(proxy, http_meta_host, http_meta_port) {
-    const startedAt = Date.now();
-    const res = await http({
-      proxy: `http://${http_meta_host}:${http_meta_port}`,
-      method,
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
-      },
-      url: openai_url,
-    })
-    const status = parseInt(res.status || res.statusCode || 200)
-      let body = String(res.body ?? res.rawBody)
+  /**
+   * Google AI 检测
+   * 若返回的 headers.location === 'https://ai.google.dev/gemini-api/docs/available-regions'，判定为失败
+   */
+  async function checkGoogleAI(proxy) {
+    const { status, headers } = await requestThroughProxy(proxy, google_url)
+    const loc = headers?.location || ''
+    // 如果出现 301/302 并且跳转到 restricted url，则失败
+    if ((status === 301 || status === 302) && loc.includes('ai.google.dev/gemini-api/docs/available-regions')) {
+      $.info(`[${proxy.name}] Google AI 检测 -> FAIL (Region Restricted)`)
+      return false
+    }
+    $.info(`[${proxy.name}] Google AI 检测 -> PASS`)
+    return true
+  }
+
+  /**
+   * Anthropic 检测 (Claude)
+   * 若返回的 headers.location === 'https://www.anthropic.com/app-unavailable-in-region?utm_source=country'，判定为失败
+   */
+  async function checkAnthropic(proxy) {
+    const { status, headers } = await requestThroughProxy(proxy, anthropic_url)
+    const loc = headers?.location || ''
+    if ((status === 301 || status === 302) && loc.includes('anthropic.com/app-unavailable-in-region?utm_source=country')) {
+      $.info(`[${proxy.name}] Claude (Anthropic) 检测 -> FAIL (Region Restricted)`)
+      return false
+    }
+    $.info(`[${proxy.name}] Claude (Anthropic) 检测 -> PASS`)
+    return true
+  }
+
+  /**
+   * OpenAI 检测 (原脚本的做法)
+   * 以403并且非 unsupported_country 为通过
+   */
+  async function checkOpenAI(proxy) {
+    const { status, body } = await requestThroughProxy(proxy, openai_url)
+    let msg = ''
+    try {
+      const parsed = JSON.parse(body)
+      msg = parsed?.error?.error_type || parsed?.cf_details
+    } catch (e) {
+      // ignore
+    }
+    // 当 status=403 且 msg != 'unsupported_country' => 通过
+    if (status === 403 && msg !== 'unsupported_country') {
+      $.info(`[${proxy.name}] OpenAI 检测 -> PASS`)
+      return true
+    }
+    $.info(`[${proxy.name}] OpenAI 检测 -> FAIL`)
+    return false
+  }
+
+  // 判断节点名是否含有 🇭🇰/香港/Hong/HK
+  function isHKNode(name) {
+    return /🇭🇰|香港|Hong|HK/i.test(name)
+  }
+
+  // 获取缓存ID
+  function getCacheId(proxy) {
+    const relevantProxyFields = Object.fromEntries(
+      Object.entries(proxy).filter(([key]) => !/^(name|collectionName|subName|id|_.*)$/i.test(key))
+    )
+    return `http-meta:ai-detect:${JSON.stringify(relevantProxyFields)}`
+  }
+
+  // 发起请求的通用函数
+  async function requestThroughProxy(proxy, url) {
+    const index = internalProxies.indexOf(proxy)
+    const startedAt = Date.now()
+    const TIMEOUT = parseFloat($arguments.timeout || 5000)
+
+    // 每个检测都可按需 retry，这里复用主脚本的 retry 参数
+    const RETRIES = parseInt($arguments.retries ?? 1)
+    const RETRY_DELAY = parseInt($arguments.retry_delay ?? 1000)
+
+    let count = 0
+    async function doRequest() {
       try {
-        body = JSON.parse(body)
-      } catch (e) {}
-      const msg = body?.error?.error_type || body?.cf_details
-      let latency = ''
-      latency = `${Date.now() - startedAt}`
-      $.info(`[${proxy.name}] OpenAI status: ${status}, msg: ${msg}, latency: ${latency}`)
-      if (status == 403 && !['unsupported_country'].includes(msg)) {
-        return true;
-      } else {
-        return false;
+        const res = await $.http[method]({
+          proxy: `http://${http_meta_host}:${http_meta_ports[index]}`,
+          timeout: TIMEOUT,
+          url,
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
+          },
+        })
+        return res
+      } catch (e) {
+        if (count < RETRIES) {
+          count++
+          $.info(`第 ${count} 次请求失败: ${e.message || e}, 等待 ${RETRY_DELAY}ms 后重试`)
+          await $.wait(RETRY_DELAY)
+          return doRequest()
+        } else {
+          throw e
+        }
       }
-  }
-
-  async function checkClaude(proxy, http_meta_host, http_meta_port) {
-    const startedAt = Date.now();
-    const res = await http({
-      proxy: `http://${http_meta_host}:${http_meta_port}`,
-      method,
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
-      },
-      url: claude_url,
-    })
-    const status = parseInt(res.status ?? res.statusCode ?? 200);
-
-    let body = String(res.body ?? res.rawBody)
-    let latency = `${Date.now() - startedAt}`
-    $.info(`[${proxy.name}] Claude status: ${status}, latency: ${latency}`)
-    if (status >= 200 && status < 400) {
-      if (body.includes("unavailable-in-region")) {
-        return false
-      }
-      return true;
-    } else {
-      return false
     }
+
+    const res = await doRequest()
+    const latency = Date.now() - startedAt
+    $.info(`[${proxy.name}] 请求 ${url} -> status:${res.status}, latency:${latency}ms`)
+    return { status: parseInt(res.status ?? res.statusCode ?? 200), headers: res.headers ?? {}, body: String(res.body ?? '') }
   }
 
-  async function checkGoogleAI(proxy, http_meta_host, http_meta_port) {
-    const startedAt = Date.now();
-    const res = await http({
-      proxy: `http://${http_meta_host}:${http_meta_port}`,
-      method,
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1',
-      },
-      url: googleai_url,
-    })
-    const status = parseInt(res.status ?? res.statusCode ?? 200);
+  // 并发调度
+  async function executeAsyncTasks(tasks, { concurrency = 1 } = {}) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        let running = 0
+        let index = 0
 
-    let body = String(res.body ?? res.rawBody)
-    let latency = `${Date.now() - startedAt}`
-    $.info(`[${proxy.name}] Google AI status: ${status}, latency: ${latency}`)
-    if (status >= 200 && status < 400) {
-      if (body.includes("available-regions")) {
-        return false;
+        async function executeNextTask() {
+          while (index < tasks.length && running < concurrency) {
+            const taskIndex = index++
+            const task = tasks[taskIndex]
+            running++
+            task()
+              .finally(() => {
+                running--
+                executeNextTask()
+              })
+          }
+
+          if (running === 0 && index >= tasks.length) {
+            resolve()
+          }
+        }
+
+        await executeNextTask()
+      } catch (err) {
+        reject(err)
       }
-      return true;
-    } else {
-      return false
-    }
+    })
   }
 
-  // 请求
+  // 简化的 http 帮助函数
   async function http(opt = {}) {
     const METHOD = opt.method || $arguments.method || 'get'
     const TIMEOUT = parseFloat(opt.timeout || $arguments.timeout || 5000)
@@ -312,69 +372,20 @@ ${JSON.stringify(res, null, 2)}`)
     const RETRY_DELAY = parseFloat(opt.retry_delay ?? $arguments.retry_delay ?? 1000)
 
     let count = 0
-    const fn = async () => {
+    async function fn() {
       try {
         return await $.http[METHOD]({ ...opt, timeout: TIMEOUT })
       } catch (e) {
-        // $.error(e)
         if (count < RETRIES) {
           count++
-          const delay = RETRY_DELAY * count
-          // $.info(`第 ${count} 次请求失败: ${e.message || e}, 等待 ${delay / 1000}s 后重试`)
-          await $.wait(delay)
-          return await fn()
+          $.info(`第 ${count} 次请求失败: ${e.message || e}, 等待 ${RETRY_DELAY}ms 后重试`)
+          await $.wait(RETRY_DELAY)
+          return fn()
         } else {
           throw e
         }
       }
     }
-    return await fn()
-  }
-  function getCacheId({ proxy = {}, openai_url, claude_url, googleai_url }) {
-    return `http-meta:ai:${openai_url}:${claude_url}:${googleai_url}:${JSON.stringify(
-      Object.fromEntries(Object.entries(proxy).filter(([key]) => !/^(name|collectionName|subName|id|_.*)$/i.test(key)))
-    )}`
-  }
-  function executeAsyncTasks(tasks, { wrap, result, concurrency = 1 } = {}) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        let running = 0
-        const results = []
-
-        let index = 0
-
-        function executeNextTask() {
-          while (index < tasks.length && running < concurrency) {
-            const taskIndex = index++
-            const currentTask = tasks[taskIndex]
-            running++
-
-            currentTask()
-              .then(data => {
-                if (result) {
-                  results[taskIndex] = wrap ? { data } : data
-                }
-              })
-              .catch(error => {
-                if (result) {
-                  results[taskIndex] = wrap ? { error } : error
-                }
-              })
-              .finally(() => {
-                running--
-                executeNextTask()
-              })
-          }
-
-          if (running === 0) {
-            return resolve(result ? results : undefined)
-          }
-        }
-
-        await executeNextTask()
-      } catch (e) {
-        reject(e)
-      }
-    })
+    return fn()
   }
 }
